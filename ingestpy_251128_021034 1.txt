@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""ESQET-AGI Universal Ingester: git clone + wget + files"""
+import git
+import os
+import requests
+from pathlib import Path
+import hashlib
+
+def universal_ingest(source: str, cache_dir: str = "./ingested") -> str:
+    """ANY input → content hash for seed identification"""
+    Path(cache_dir).mkdir(exist_ok=True)
+    
+    if source.startswith('https://github.com/'):
+        return ingest_git_repo(source, cache_dir)
+    elif source.startswith('http'):
+        return ingest_webpage(source)
+    elif os.path.exists(source):
+        return ingest_local_file(source)
+    else:
+        return hashlib.sha256(source.encode()).hexdigest()
+
+def ingest_git_repo(url: str, cache_dir: str) -> str:
+    repo_name = url.split('/')[-1].replace('.git', '')
+    target = Path(cache_dir) / repo_name
+    if not target.exists():
+        git.Repo.clone_from(url, target)
+    return repo_content_hash(target)
+
+def ingest_webpage(url: str) -> str:
+    r = requests.get(url, timeout=10)
+    return hashlib.sha256(r.text.encode()).hexdigest()
+
+def ingest_local_file(path: str) -> str:
+    with open(path, 'rb') as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+def repo_content_hash(repo_path: Path) -> str:
+    parts = []
+    for fp in repo_path.rglob('*'):
+        if fp.is_file() and '.git' not in str(fp):
+            try:
+                parts.append(fp.read_text()[:1000])
+            except:
+                pass
+    return hashlib.sha256(''.join(parts).encode()).hexdigest()
