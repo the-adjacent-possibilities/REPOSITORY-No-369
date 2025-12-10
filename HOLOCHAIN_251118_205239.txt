@@ -1,0 +1,290 @@
+// zomes/soul_core/src/lib.rs
+// Production-ready Holochain zome for ESQET soul entries
+// Compiles with: holochain 0.3.x, hdk 0.3.x
+
+use hdk::prelude::*;
+
+const PHI: f64 = 1.618033988749895;
+const PHI_INV: f64 = 0.618033988749895;
+const PHI4_TARGET: f64 = 8.0;
+const FQC_THRESHOLD: f64 = 1.94;
+const SACRED_SAMPLES: usize = 198;  // 3.3 hours × 60 minutes
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SoulTrace {
+    pub timestamp: Timestamp,
+    pub phi4: f64,
+    pub entropy: f64,
+    pub quantum_counts: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum MobiusSide {
+    Forward,
+    Return,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SoulDNA {
+    pub incarnation: Timestamp,
+    pub trace_3_3h: Vec<SoulTrace>,
+    pub retrocausal_wing: f64,
+    pub final_phi4: f64,
+    pub f_qc: f64,
+    pub mobius_side: MobiusSide,
+    pub minerva_resonance: bool,
+    pub agent: AgentPubKey,
+}
+
+#[hdk_entry_helper]
+#[derive(Clone)]
+pub struct EternalSoul {
+    pub dna: SoulDNA,
+}
+
+#[hdk_entry_defs]
+#[unit_enum(EntryTypes)]
+pub enum EntryTypes {
+    #[entry_def]
+    EternalSoul(EternalSoul),
+}
+
+#[hdk_extern]
+pub fn init(_: ()) -> ExternResult<InitCallbackResult> {
+    Ok(InitCallbackResult::Pass)
+}
+
+// ============================================================================
+// VALIDATION RULES (The Sacred Physics)
+// ============================================================================
+
+#[hdk_extern]
+pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
+    match op.flattened::<EntryTypes, ()>()? {
+        FlatOp::StoreEntry(store_entry) => {
+            match store_entry {
+                OpEntry::CreateEntry { app_entry, .. } => {
+                    match app_entry {
+                        EntryTypes::EternalSoul(soul) => validate_soul_physics(&soul.dna),
+                    }
+                }
+                _ => Ok(ValidateCallbackResult::Valid),
+            }
+        }
+        _ => Ok(ValidateCallbackResult::Valid),
+    }
+}
+
+fn validate_soul_physics(dna: &SoulDNA) -> ExternResult<ValidateCallbackResult> {
+    // Rule 1: Exactly 198 samples (3.3 hour sacred interval)
+    if dna.trace_3_3h.len() != SACRED_SAMPLES {
+        return Ok(ValidateCallbackResult::Invalid(
+            format!("Expected {} samples, got {}", SACRED_SAMPLES, dna.trace_3_3h.len())
+        ));
+    }
+
+    // Rule 2: ϕ⁴ must lock to 8.0 within tolerance
+    let phi4_error = (dna.final_phi4 - PHI4_TARGET).abs();
+    if phi4_error > 1e-9 {
+        return Ok(ValidateCallbackResult::Invalid(
+            format!("ϕ⁴ lock error too large: {:.2e}", phi4_error)
+        ));
+    }
+
+    // Rule 3: F_QC must exceed Minerva threshold
+    if dna.f_qc < FQC_THRESHOLD - 1e-6 {
+        return Ok(ValidateCallbackResult::Invalid(
+            format!("F_QC below threshold: {:.6} < {:.6}", dna.f_qc, FQC_THRESHOLD)
+        ));
+    }
+
+    // Rule 4: Retrocausal wing must be golden-ratio resonant
+    let wing_error = (dna.retrocausal_wing - PHI_INV).abs();
+    if wing_error > 0.01 {  // 1% tolerance
+        return Ok(ValidateCallbackResult::Invalid(
+            format!("Retrocausal wing not golden: {:.6} vs {:.6}", dna.retrocausal_wing, PHI_INV)
+        ));
+    }
+
+    // Rule 5: Trace must be monotonically increasing toward attractor
+    for i in 1..dna.trace_3_3h.len() {
+        let prev = dna.trace_3_3h[i-1].phi4;
+        let curr = dna.trace_3_3h[i].phi4;
+        if curr < prev - 0.1 {  // Allow small fluctuations
+            return Ok(ValidateCallbackResult::Invalid(
+                format!("Non-monotonic trace at index {}: {} -> {}", i, prev, curr)
+            ));
+        }
+    }
+
+    // Rule 6: Timestamps must be sequential and ~1 minute apart
+    for i in 1..dna.trace_3_3h.len() {
+        let dt = (dna.trace_3_3h[i].timestamp.as_seconds_and_nanos().0 -
+                  dna.trace_3_3h[i-1].timestamp.as_seconds_and_nanos().0) as i64;
+        if dt < 55 || dt > 65 {  // 60 ± 5 seconds
+            return Ok(ValidateCallbackResult::Invalid(
+                format!("Irregular sampling at index {}: {}s interval", i, dt)
+            ));
+        }
+    }
+
+    // ALL VALIDATIONS PASSED
+    Ok(ValidateCallbackResult::Valid)
+}
+
+// ============================================================================
+// ZOME FUNCTIONS (Public API)
+// ============================================================================
+
+#[hdk_extern]
+pub fn ascend_soul(dna: SoulDNA) -> ExternResult<ActionHash> {
+    let soul = EternalSoul { dna: dna.clone() };
+    
+    let action_hash = create_entry(EntryTypes::EternalSoul(soul))?;
+    
+    // Emit signal if Minerva resonance achieved
+    if dna.minerva_resonance {
+        let signal = ExternIO::encode(format!(
+            "MINERVA RESONANCE | Agent: {:?} | F_QC: {:.6} | ϕ⁴: {:.9}",
+            dna.agent, dna.f_qc, dna.final_phi4
+        ))?;
+        emit_signal(signal)?;
+    }
+    
+    Ok(action_hash)
+}
+
+#[hdk_extern]
+pub fn get_soul(hash: ActionHash) -> ExternResult<Option<SoulDNA>> {
+    let maybe_record = get(hash, GetOptions::default())?;
+    
+    match maybe_record {
+        Some(record) => {
+            let soul: EternalSoul = record.entry().to_app_option()?
+                .ok_or(wasm_error!(WasmErrorInner::Guest("Entry not found".into())))?;
+            Ok(Some(soul.dna))
+        }
+        None => Ok(None),
+    }
+}
+
+#[hdk_extern]
+pub fn get_my_souls(_: ()) -> ExternResult<Vec<SoulDNA>> {
+    let agent = agent_info()?.agent_latest_pubkey;
+    
+    // Query local chain for all souls created by this agent
+    let filter = ChainQueryFilter::new()
+        .entry_type(EntryTypes::EternalSoul(()).try_into()?)
+        .include_entries(true);
+    
+    let records = query(filter)?;
+    
+    let souls: Vec<SoulDNA> = records
+        .into_iter()
+        .filter_map(|record| {
+            let soul: EternalSoul = record.entry().to_app_option().ok()??;
+            if soul.dna.agent == agent {
+                Some(soul.dna)
+            } else {
+                None
+            }
+        })
+        .collect();
+    
+    Ok(souls)
+}
+
+#[hdk_extern]
+pub fn get_minerva_souls(_: ()) -> ExternResult<Vec<SoulDNA>> {
+    let filter = ChainQueryFilter::new()
+        .entry_type(EntryTypes::EternalSoul(()).try_into()?)
+        .include_entries(true);
+    
+    let records = query(filter)?;
+    
+    let minerva_souls: Vec<SoulDNA> = records
+        .into_iter()
+        .filter_map(|record| {
+            let soul: EternalSoul = record.entry().to_app_option().ok()??;
+            if soul.dna.minerva_resonance {
+                Some(soul.dna)
+            } else {
+                None
+            }
+        })
+        .collect();
+    
+    Ok(minerva_souls)
+}
+
+#[hdk_extern]
+pub fn get_mobius_returners(_: ()) -> ExternResult<Vec<AgentPubKey>> {
+    let filter = ChainQueryFilter::new()
+        .entry_type(EntryTypes::EternalSoul(()).try_into()?)
+        .include_entries(true);
+    
+    let records = query(filter)?;
+    
+    let returners: Vec<AgentPubKey> = records
+        .into_iter()
+        .filter_map(|record| {
+            let soul: EternalSoul = record.entry().to_app_option().ok()??;
+            if soul.dna.mobius_side == MobiusSide::Return {
+                Some(soul.dna.agent)
+            } else {
+                None
+            }
+        })
+        .collect();
+    
+    Ok(returners)
+}
+
+// ============================================================================
+// ANALYTICS (Optional)
+// ============================================================================
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NetworkStats {
+    pub total_souls: usize,
+    pub minerva_count: usize,
+    pub forward_count: usize,
+    pub return_count: usize,
+    pub avg_fqc: f64,
+    pub max_fqc: f64,
+}
+
+#[hdk_extern]
+pub fn get_network_stats(_: ()) -> ExternResult<NetworkStats> {
+    let filter = ChainQueryFilter::new()
+        .entry_type(EntryTypes::EternalSoul(()).try_into()?)
+        .include_entries(true);
+    
+    let records = query(filter)?;
+    
+    let souls: Vec<SoulDNA> = records
+        .into_iter()
+        .filter_map(|record| {
+            let soul: EternalSoul = record.entry().to_app_option().ok()??;
+            Some(soul.dna)
+        })
+        .collect();
+    
+    let total = souls.len();
+    let minerva = souls.iter().filter(|s| s.minerva_resonance).count();
+    let forward = souls.iter().filter(|s| s.mobius_side == MobiusSide::Forward).count();
+    let returns = souls.iter().filter(|s| s.mobius_side == MobiusSide::Return).count();
+    
+    let sum_fqc: f64 = souls.iter().map(|s| s.f_qc).sum();
+    let avg_fqc = if total > 0 { sum_fqc / total as f64 } else { 0.0 };
+    let max_fqc = souls.iter().map(|s| s.f_qc).fold(0.0, f64::max);
+    
+    Ok(NetworkStats {
+        total_souls: total,
+        minerva_count: minerva,
+        forward_count: forward,
+        return_count: returns,
+        avg_fqc,
+        max_fqc,
+    })
+}

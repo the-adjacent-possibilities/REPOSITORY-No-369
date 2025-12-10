@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""
+QH-NFT Resonance Activator: Vocal J_χ Generation for K_FB Cancellation
+Records 432 Hz-aligned vocal, computes \mathbf{J}_\chi, discharges \mathcal{G}_{acc} to achieve ZKS.
+Run: python qh_nft_resonance.py (5s recording; Termux mic)
+Output: J_χ value, discharge, FQC post-ZKS.
+
+Date: 2025-11-10 (ESQET-UIFT)
+"""
+
+import subprocess
+import json
+import numpy as np
+from scipy.fft import fft
+from scipy.stats import entropy
+import time
+import math
+
+# ESQET Constants
+PHI = (1 + math.sqrt(5)) / 2
+PI = math.pi
+DELTA = 0.5
+FCU = PHI * PI * DELTA  # ~1.94
+K_FB = 1 / PHI**2  # ~0.382 (damping)
+G_ACC = PHI**8  # ~47.0 (8 eggs accumulated)
+
+def record_vocal(duration=5, sr=44100):
+    """Record vocal with Termux mic."""
+    audio_path = f"vocal_{int(time.time())}.wav"
+    cmd = ['termux-microphone-record', '-f', audio_path, '-r', str(sr), '-l', str(duration)]
+    subprocess.run(cmd, check=True)
+    return audio_path
+
+def compute_j_chi(audio_path, omega0=432.0):
+    """Compute J_χ from vocal waveform."""
+    # Load audio (simple wave read; assumes mono)
+    cmd = ['sox', audio_path, '-n', 'stat', '2>&1']
+    stats = subprocess.check_output(cmd).decode()
+    # Extract RMS energy as proxy for \rho_obs
+    rho_obs = float(stats.split('RMS lev dB: ')[1].split('\n')[0]) if 'RMS' in stats else 0.1
+    
+    # FFT for spectrum
+    cmd = ['sox', audio_path, '-n', 'fft', '-']
+    spectrum = subprocess.check_output(cmd).decode().splitlines()
+    f = np.linspace(0, 22050, len(spectrum))
+    psi_hat = np.array([complex(line.split()[0]) for line in spectrum[:len(spectrum)//2]])  # Simplified FFT
+    
+    # Coherent entropy
+    probs = np.abs(psi_hat)**2
+    probs /= np.sum(probs)
+    delta_s_vocal = entropy(probs[probs > 0], base=2)
+    
+    # Resonance kernel
+    R_res = 1 / (1 + ((f - omega0) / 10)**2)  # Lorentzian (linewidth 10 Hz)
+    R_res = np.sum(R_res * probs) / np.sum(probs)  # Weighted
+    
+    # FCU phase integral
+    phase = np.sum(psi_hat * np.exp(1j * PHI * PI * DELTA * f / omega0))
+    
+    # J_χ = ρ_obs * F_AC * integral
+    F_AC = (1 - delta_s_vocal) * R_res
+    J_chi = rho_obs * F_AC * np.abs(phase)
+    
+    return J_chi, F_AC, delta_s_vocal
+
+def discharge_g_acc(J_chi, g_acc=G_ACC):
+    """Discharge \mathcal{G}_{acc} to cancel K_FB."""
+    C = - K_FB * g_acc * J_chi
+    return C
+
+def validate_zks(C):
+    """Validate ZKS: FQC spike if C ≈ -K_FB * G_acc."""
+    if abs(C + K_FB * G_ACC) < 0.1:
+        return True, 1.94  # FCU limit
+    return False, 0.5
+
+if __name__ == "__main__":
+    print("🌀 QH-NFT Resonance Activator: Vocal J_χ for ZKS")
+    audio = record_vocal()
+    J_chi, F_AC, delta_s = compute_j_chi(audio)
+    print(f"J_χ: {J_chi:.4f} | F_AC: {F_AC:.4f} | ΔS_vocal: {delta_s:.4f}")
+    C = discharge_g_acc(J_chi)
+    print(f"C(J_χ): {C:.4f}")
+    zks_valid, fqc = validate_zks(C)
+    print(f"ZKS Valid: {zks_valid} | Post-FQC: {fqc:.4f}")
+    os.remove(audio)  # Cleanup

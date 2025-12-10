@@ -1,0 +1,326 @@
+// aetherchain_v2.js — Minerva-Compatible Retrocausal Blockchain
+const crypto = require('crypto');
+const { ethers } = require('ethers');
+
+const PHI = (1 + Math.sqrt(5)) / 2;
+const PHINV = 1 / PHI;
+const LAMBDA = 8.4e-5;  // s⁻¹
+const GAMMA = 1.7e-3;
+const KAPPA = 9.1e-24;
+const PHI4_TARGET = 8.0;
+const FCU_LIMIT = 1.94;
+const PRECURSOR_WINDOW = 3.31 * 3600;  // 3.31 hours in seconds
+
+class MinervaCommitment {
+  constructor(flash_time, salt) {
+    this.flash_time = flash_time;  // Unix timestamp
+    this.salt = salt;              // 256-bit random
+    this.hash = crypto.createHash('sha512')
+      .update(flash_time.toString() + salt)
+      .digest('hex');
+    this.revealed = false;
+  }
+
+  reveal(claimed_time, claimed_salt) {
+    const test_hash = crypto.createHash('sha512')
+      .update(claimed_time.toString() + claimed_salt)
+      .digest('hex');
+    if (test_hash === this.hash) {
+      this.revealed = true;
+      return true;
+    }
+    return false;
+  }
+}
+
+class AetherBlock {
+  constructor(index, previousHash, timestamp, fieldData, minerDNA, minervaCommitment) {
+    this.index = index;
+    this.previousHash = previousHash;
+    this.timestamp = timestamp;
+    this.fieldData = fieldData;  // 3.3 hours of ϕ⁴ measurements
+    this.minerDNA = minerDNA;
+    this.minervaCommitment = minervaCommitment;  // Future flash commitment
+    
+    // Core physics computations
+    this.phi4_trace = this.computePhi4Trace();
+    this.retrocausal_signature = this.detectRetrocausalSignature();
+    this.f_qc = this.computeFQC();
+    
+    this.nonce = 0;
+    this.hash = this.calculateHash();
+  }
+
+  computePhi4Trace() {
+    // Integrate Master Equation with actual sensor data
+    const trace = [];
+    let phi4 = 7.2;  // Initial coherence
+    
+    for (let i = 0; i < this.fieldData.length - 1; i++) {
+      const dt = this.fieldData[i+1].timestamp - this.fieldData[i].timestamp;
+      const t = this.fieldData[i].timestamp;
+      
+      // Memory functional from symmetric past/future
+      const M = this.computeMemoryFunctional(i, this.fieldData);
+      
+      // Stochastic differential equation
+      const drift = -GAMMA * phi4 + KAPPA * M;
+      const diffusion = Math.sqrt(2 * 3.8e-16 / dt) * this.gaussianNoise();
+      
+      phi4 += (drift * dt + diffusion);
+      
+      // Lock to attractor
+      if (Math.abs(phi4 - PHI4_TARGET) < 1e-9) {
+        phi4 = PHI4_TARGET;
+      }
+      
+      trace.push({ time: t, value: phi4 });
+    }
+    
+    return trace;
+  }
+
+  computeMemoryFunctional(current_idx, data) {
+    let memory = 0;
+    const t_current = data[current_idx].timestamp;
+    
+    // Symmetric time integration (past AND future relative to current point)
+    for (let j = 0; j < data.length; j++) {
+      const t_j = data[j].timestamp;
+      const dt = Math.abs(t_j - t_current);
+      const kernel = Math.exp(-LAMBDA * dt);
+      memory += kernel * data[j].phi4;
+    }
+    
+    return memory / data.length;  // Normalize
+  }
+
+  detectRetrocausalSignature() {
+    if (!this.minervaCommitment || !this.minervaCommitment.revealed) {
+      return { detected: false, reason: "No revealed Minerva commitment" };
+    }
+
+    const flash_time = this.minervaCommitment.flash_time;
+    const precursor_start = flash_time - PRECURSOR_WINDOW - 600;  // 10 min before window
+    const precursor_end = flash_time - PRECURSOR_WINDOW + 600;    // 10 min after window
+
+    // Find deepest negative excursion in precursor window
+    let min_phi4 = Infinity;
+    let min_time = null;
+    let baseline_phi4 = null;
+
+    // Establish baseline (3 hours before precursor window)
+    const baseline_window = this.phi4_trace.filter(
+      p => p.time < precursor_start - 3 * 3600 && p.time > precursor_start - 4 * 3600
+    );
+    if (baseline_window.length > 0) {
+      baseline_phi4 = baseline_window.reduce((sum, p) => sum + p.value, 0) / baseline_window.length;
+    } else {
+      return { detected: false, reason: "Insufficient baseline data" };
+    }
+
+    // Search for dip in precursor window
+    const precursor_data = this.phi4_trace.filter(
+      p => p.time >= precursor_start && p.time <= precursor_end
+    );
+
+    precursor_data.forEach(point => {
+      if (point.value < min_phi4) {
+        min_phi4 = point.value;
+        min_time = point.time;
+      }
+    });
+
+    // Calculate significance
+    const dip_sigma = (baseline_phi4 - min_phi4) / Math.sqrt(baseline_phi4 * 0.01);  // Approximate noise
+    const timing_error = Math.abs(min_time - (flash_time - PRECURSOR_WINDOW));
+
+    return {
+      detected: dip_sigma >= 4.0 && timing_error <= 720,  // 4σ dip, ±12 min timing
+      dip_sigma: dip_sigma,
+      timing_error_seconds: timing_error,
+      min_phi4: min_phi4,
+      baseline_phi4: baseline_phi4,
+      expected_time: flash_time - PRECURSOR_WINDOW,
+      observed_time: min_time
+    };
+  }
+
+  computeFQC() {
+    const final_phi4 = this.phi4_trace[this.phi4_trace.length - 1].value;
+    const lock_error = Math.abs(final_phi4 - PHI4_TARGET);
+    
+    // Base F_QC from convergence
+    let f_qc = Math.min(1.94, 1.94 * Math.exp(-1e10 * lock_error));
+    
+    // Boost if retrocausal signature detected
+    if (this.retrocausal_signature.detected) {
+      f_qc = Math.min(1.94, f_qc * (1 + 0.1 * this.retrocausal_signature.dip_sigma));
+    }
+    
+    return f_qc;
+  }
+
+  gaussianNoise() {
+    // Box-Muller transform for Gaussian random
+    const u1 = Math.random();
+    const u2 = Math.random();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  }
+
+  calculateHash() {
+    return crypto.createHash('sha256').update(
+      this.index.toString() +
+      this.previousHash +
+      this.timestamp.toString() +
+      JSON.stringify(this.phi4_trace) +
+      this.minerDNA +
+      this.nonce.toString() +
+      this.f_qc.toFixed(12)
+    ).digest('hex');
+  }
+
+  mineBlock(difficulty = 4) {
+    const target = '0'.repeat(difficulty);
+    
+    console.log(`⛏️  Mining block ${this.index}...`);
+    console.log(`   F_QC target: ≥ 1.93`);
+    console.log(`   Retrocausal: ${this.retrocausal_signature.detected ? '✓ DETECTED' : '✗ None'}`);
+    
+    while (
+      this.hash.substring(0, difficulty) !== target ||
+      this.f_qc < 1.93
+    ) {
+      this.nonce++;
+      this.hash = this.calculateHash();
+      
+      if (this.nonce % 10000 === 0) {
+        process.stdout.write(`\r   Nonce: ${this.nonce} | Hash: ${this.hash.substring(0, 16)}...`);
+      }
+    }
+    
+    console.log(`\n✨ BLOCK MINED!`);
+    console.log(`   F_QC: ${this.f_qc.toFixed(6)}`);
+    console.log(`   Hash: ${this.hash}`);
+    if (this.retrocausal_signature.detected) {
+      console.log(`   🌀 Retrocausal dip: ${this.retrocausal_signature.dip_sigma.toFixed(1)}σ`);
+      console.log(`   ⏱️  Timing error: ${this.retrocausal_signature.timing_error_seconds}s`);
+    }
+  }
+}
+
+class AetherChain {
+  constructor() {
+    this.chain = [this.createGenesisBlock()];
+    this.pendingCommitments = [];
+  }
+
+  createGenesisBlock() {
+    const genesisData = Array.from({ length: 200 }, (_, i) => ({
+      timestamp: Date.now() - (200 - i) * 60000,
+      phi4: 7.2 + 0.1 * Math.random(),
+      lat: 0,
+      lon: 0
+    }));
+    
+    return new AetherBlock(0, "0", Date.now(), genesisData, "genesis", null);
+  }
+
+  getLatestBlock() {
+    return this.chain[this.chain.length - 1];
+  }
+
+  addMinervaCommitment(flash_time, salt) {
+    const commitment = new MinervaCommitment(flash_time, salt);
+    this.pendingCommitments.push(commitment);
+    console.log(`📜 Minerva commitment added: ${commitment.hash.substring(0, 16)}...`);
+    return commitment;
+  }
+
+  revealCommitment(hash, flash_time, salt) {
+    const commitment = this.pendingCommitments.find(c => c.hash === hash);
+    if (commitment && commitment.reveal(flash_time, salt)) {
+      console.log(`🔓 Commitment revealed: flash at ${new Date(flash_time).toISOString()}`);
+      return commitment;
+    }
+    return null;
+  }
+
+  addBlock(fieldData, minerDNA, commitment = null) {
+    const newBlock = new AetherBlock(
+      this.chain.length,
+      this.getLatestBlock().hash,
+      Date.now(),
+      fieldData,
+      minerDNA,
+      commitment
+    );
+    
+    newBlock.mineBlock(4);
+    this.chain.push(newBlock);
+  }
+
+  isChainValid() {
+    for (let i = 1; i < this.chain.length; i++) {
+      const currentBlock = this.chain[i];
+      const previousBlock = this.chain[i - 1];
+
+      // Hash integrity
+      if (currentBlock.hash !== currentBlock.calculateHash()) {
+        return { valid: false, reason: `Block ${i} hash mismatch` };
+      }
+
+      // Chain linkage
+      if (currentBlock.previousHash !== previousBlock.hash) {
+        return { valid: false, reason: `Block ${i} broken chain` };
+      }
+
+      // Physics validation
+      if (currentBlock.f_qc < 1.93) {
+        return { valid: false, reason: `Block ${i} F_QC too low: ${currentBlock.f_qc}` };
+      }
+    }
+
+    return { valid: true };
+  }
+
+  getRetrocausalBlocks() {
+    return this.chain.filter(block => 
+      block.retrocausal_signature && block.retrocausal_signature.detected
+    );
+  }
+}
+
+// Export for use
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { AetherChain, MinervaCommitment };
+}
+
+// Demo usage
+if (require.main === module) {
+  console.log("🌀 AetherChain v2.0 - Minerva Protocol");
+  console.log("=====================================\n");
+
+  const chain = new AetherChain();
+
+  // Simulate adding a block with Minerva commitment
+  console.log("Creating Minerva commitment for future flash...");
+  const flash_time = Date.now() + 38 * 24 * 3600 * 1000;  // 38 days from now
+  const salt = crypto.randomBytes(32).toString('hex');
+  const commitment = chain.addMinervaCommitment(flash_time, salt);
+
+  console.log("\nGenerating block data (simulated 3.3 hour trace)...");
+  const blockData = Array.from({ length: 200 }, (_, i) => ({
+    timestamp: Date.now() - (200 - i) * 60000,
+    phi4: 7.2 + 0.8 * Math.sin(i / 30) + 0.05 * Math.random(),
+    lat: 40.7128,
+    lon: -74.0060
+  }));
+
+  console.log("\nMining block...");
+  chain.addBlock(blockData, "test-miner-dna", null);
+
+  console.log("\n✅ Chain validation:", chain.isChainValid());
+  console.log(`📊 Total blocks: ${chain.chain.length}`);
+  console.log(`🌀 Retrocausal blocks: ${chain.getRetrocausalBlocks().length}`);
+}
